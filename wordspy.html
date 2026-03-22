@@ -1,0 +1,617 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WordSpy — Word Association Game</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;700;900&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+
+<!-- Firebase SDK -->
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, update, push, remove }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ─── PASTE YOUR FIREBASE CONFIG HERE ───────────────────────────────────────
+const firebaseConfig = {
+iKey: "AIzaSyA2t1Bbo4p864HoGlB_Wu7C1XKUlfqRW6I",
+  authDomain: "word-assoc.firebaseapp.com",
+  databaseURL: "https://word-assoc-default-rtdb.firebaseio.com",
+  projectId: "word-assoc",
+  storageBucket: "word-assoc.firebasestorage.app",
+  messagingSenderId: "448188690913",
+  appId: "1:448188690913:web:4e157491b9e3a23dfbe2a0",
+  measurementId: "G-RPJ1JFREML"
+};
+  
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+window._db = db;
+
+// ── helpers ─────────────────────────────────────────────────────
+function roomRef(code, ...path) {
+  return ref(db, ["rooms", code, ...path].join("/"));
+}
+function uid() {
+  return Math.random().toString(36).slice(2, 9);
+}
+function roomCode() {
+  return Math.random().toString(36).slice(2, 6).toUpperCase();
+}
+
+// ── state ────────────────────────────────────────────────────────
+let STATE = {
+  code: null, myId: null, myName: null, isHost: false, phase: "home"
+};
+
+// ── pages ────────────────────────────────────────────────────────
+function showPage(id) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+}
+function toast(msg, type = "info") {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast show " + type;
+  clearTimeout(window._toastTimer);
+  window._toastTimer = setTimeout(() => t.classList.remove("show"), 3000);
+}
+function setLoader(btn, loading) {
+  btn.disabled = loading;
+  btn.dataset.orig = btn.dataset.orig || btn.textContent;
+  btn.textContent = loading ? "…" : btn.dataset.orig;
+}
+
+// ── HOME ─────────────────────────────────────────────────────────
+window.createRoom = async function () {
+  const name = document.getElementById("h-name").value.trim();
+  if (!name) return toast("Enter your name first", "error");
+  const btn = document.getElementById("btn-create");
+  setLoader(btn, true);
+  const code = roomCode();
+  const myId  = uid();
+  const room = {
+    host: myId,
+    phase: "lobby",
+    word: "",
+    impostorCount: 1,
+    players: { [myId]: { name, isImpostor: false, hasWord: false } }
+  };
+  await set(ref(db, "rooms/" + code), room);
+  STATE = { code, myId, myName: name, isHost: true, phase: "lobby" };
+  setLoader(btn, false);
+  enterLobby();
+};
+
+window.joinRoom = async function () {
+  const name = document.getElementById("j-name").value.trim();
+  const code = document.getElementById("j-code").value.trim().toUpperCase();
+  if (!name || !code) return toast("Fill in both fields", "error");
+  const btn = document.getElementById("btn-join");
+  setLoader(btn, true);
+  const snap = await get(ref(db, "rooms/" + code));
+  if (!snap.exists()) { setLoader(btn, false); return toast("Room not found", "error"); }
+  const data = snap.val();
+  if (data.phase !== "lobby") { setLoader(btn, false); return toast("Game already started", "error"); }
+  const myId = uid();
+  await update(ref(db, `rooms/${code}/players/${myId}`), { name, isImpostor: false, hasWord: false });
+  STATE = { code, myId, myName: name, isHost: false, phase: "lobby" };
+  setLoader(btn, false);
+  enterLobby();
+};
+
+// ── LOBBY ────────────────────────────────────────────────────────
+let _lobbyUnsub = null;
+function enterLobby() {
+  showPage("page-lobby");
+  document.getElementById("lobby-code").textContent = STATE.code;
+  const hostControls = document.getElementById("host-controls");
+  hostControls.style.display = STATE.isHost ? "block" : "none";
+  document.getElementById("waiting-msg").style.display = STATE.isHost ? "none" : "block";
+
+  if (_lobbyUnsub) _lobbyUnsub();
+  _lobbyUnsub = onValue(roomRef(STATE.code), snap => {
+    if (!snap.exists()) return;
+    const room = snap.val();
+    renderPlayerList(room.players || {});
+    if (room.phase === "active" && STATE.phase !== "active") {
+      STATE.phase = "active";
+      const me = (room.players || {})[STATE.myId];
+      if (me) showWordReveal(room.word, me.isImpostor);
+    }
+  });
+}
+
+function renderPlayerList(players) {
+  const list = document.getElementById("player-list");
+  const entries = Object.entries(players);
+  list.innerHTML = entries.map(([id, p]) => `
+    <div class="player-chip ${id === STATE.myId ? "me" : ""}">
+      <span class="chip-name">${p.name}</span>
+      ${STATE.isHost && id !== STATE.myId ? `
+        <button class="chip-toggle ${p.isImpostor ? "imp" : ""}" onclick="toggleImpostor('${id}')">
+          ${p.isImpostor ? "🕵️ Spy" : "👤 Agent"}
+        </button>` : ""}
+      ${id === STATE.myId ? `<span class="you-badge">YOU</span>` : ""}
+    </div>`).join("");
+
+  // update impostor count badge
+  const spies = entries.filter(([,p]) => p.isImpostor).length;
+  document.getElementById("spy-count").textContent = `${spies} spy${spies !== 1 ? "s" : ""} marked`;
+}
+
+window.toggleImpostor = async function(pid) {
+  const snap = await get(roomRef(STATE.code, "players", pid, "isImpostor"));
+  await update(roomRef(STATE.code, "players", pid), { isImpostor: !snap.val() });
+};
+
+window.startGame = async function() {
+  const word = document.getElementById("game-word").value.trim();
+  if (!word) return toast("Enter the secret word", "error");
+  const snap = await get(roomRef(STATE.code, "players"));
+  const players = snap.val() || {};
+  // give non-impostors the word
+  const updates = {};
+  for (const [id, p] of Object.entries(players)) {
+    updates[`players/${id}/hasWord`] = !p.isImpostor;
+  }
+  updates["word"] = word;
+  updates["phase"] = "active";
+  await update(roomRef(STATE.code), updates);
+};
+
+// ── WORD REVEAL ──────────────────────────────────────────────────
+function showWordReveal(word, isImpostor) {
+  if (_lobbyUnsub) { _lobbyUnsub(); _lobbyUnsub = null; }
+  showPage("page-reveal");
+  const card = document.getElementById("reveal-card");
+  const label = document.getElementById("reveal-label");
+  const wordEl = document.getElementById("reveal-word");
+  const sub = document.getElementById("reveal-sub");
+
+  if (isImpostor) {
+    card.className = "reveal-card impostor";
+    label.textContent = "YOU ARE";
+    wordEl.textContent = "THE SPY";
+    sub.textContent = "No word for you. Blend in. Don't get caught.";
+  } else {
+    card.className = "reveal-card agent";
+    label.textContent = "THE WORD IS";
+    wordEl.textContent = word.toUpperCase();
+    sub.textContent = "Give a clue. One word. Don't make it obvious.";
+  }
+  // listen for reset
+  onValue(roomRef(STATE.code, "phase"), snap => {
+    if (snap.val() === "lobby") { STATE.phase = "lobby"; enterLobby(); }
+  });
+}
+
+window.newRound = async function() {
+  if (!STATE.isHost) return;
+  // reset players
+  const snap = await get(roomRef(STATE.code, "players"));
+  const players = snap.val() || {};
+  const updates = { phase: "lobby", word: "" };
+  for (const id of Object.keys(players)) {
+    updates[`players/${id}/isImpostor`] = false;
+    updates[`players/${id}/hasWord`]    = false;
+  }
+  await update(roomRef(STATE.code), updates);
+};
+
+window.leaveGame = function() {
+  if (_lobbyUnsub) _lobbyUnsub();
+  STATE = { code: null, myId: null, myName: null, isHost: false, phase: "home" };
+  showPage("page-home");
+};
+</script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:    #0a0a0f;
+    --card:  #111118;
+    --border:#2a2a3a;
+    --gold:  #c9a84c;
+    --gold2: #e8c96a;
+    --red:   #c94c4c;
+    --green: #4cc994;
+    --text:  #e8e4dc;
+    --muted: #7a7a8a;
+    --font-display: 'Playfair Display', serif;
+    --font-mono:    'DM Mono', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-mono);
+    min-height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background-image:
+      radial-gradient(ellipse 60% 40% at 20% 10%, rgba(201,168,76,.07) 0%, transparent 60%),
+      radial-gradient(ellipse 40% 60% at 80% 90%, rgba(76,201,148,.05) 0%, transparent 60%);
+  }
+
+  /* ── layout ── */
+  .page { display: none; width: 100%; max-width: 480px; animation: fadeUp .4s ease; }
+  .page.active { display: block; }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(16px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── card ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 2rem;
+    position: relative;
+    overflow: hidden;
+  }
+  .card::before {
+    content: "";
+    position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--gold), transparent);
+  }
+
+  /* ── logo ── */
+  .logo {
+    text-align: center;
+    margin-bottom: 2rem;
+  }
+  .logo-eye {
+    font-size: 2.5rem;
+    display: block;
+    margin-bottom: .5rem;
+    filter: drop-shadow(0 0 12px rgba(201,168,76,.6));
+  }
+  .logo h1 {
+    font-family: var(--font-display);
+    font-size: 2.4rem;
+    font-weight: 900;
+    letter-spacing: -.02em;
+    background: linear-gradient(135deg, var(--gold) 0%, var(--gold2) 50%, var(--gold) 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .logo p {
+    color: var(--muted);
+    font-size: .75rem;
+    letter-spacing: .2em;
+    text-transform: uppercase;
+    margin-top: .25rem;
+  }
+
+  /* ── divider ── */
+  .divider {
+    display: flex; align-items: center; gap: .75rem;
+    color: var(--muted); font-size: .7rem; letter-spacing: .15em;
+    text-transform: uppercase; margin: 1.5rem 0;
+  }
+  .divider::before, .divider::after {
+    content: ""; flex: 1; height: 1px; background: var(--border);
+  }
+
+  /* ── inputs ── */
+  label { display: block; font-size: .7rem; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); margin-bottom: .4rem; }
+  .field { margin-bottom: 1rem; }
+  input[type=text] {
+    width: 100%;
+    background: rgba(255,255,255,.04);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: .95rem;
+    padding: .65rem .85rem;
+    outline: none;
+    transition: border-color .2s;
+  }
+  input[type=text]:focus { border-color: var(--gold); }
+  input[type=text]::placeholder { color: var(--muted); }
+
+  /* ── buttons ── */
+  .btn {
+    display: block; width: 100%;
+    padding: .75rem 1.25rem;
+    border: none; border-radius: 3px;
+    font-family: var(--font-mono);
+    font-size: .85rem;
+    font-weight: 500;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all .2s;
+  }
+  .btn-primary {
+    background: var(--gold);
+    color: #0a0a0f;
+  }
+  .btn-primary:hover:not(:disabled) { background: var(--gold2); transform: translateY(-1px); }
+  .btn-ghost {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--gold); color: var(--gold); }
+  .btn-danger {
+    background: transparent;
+    border: 1px solid #3a1a1a;
+    color: var(--red);
+  }
+  .btn-danger:hover:not(:disabled) { border-color: var(--red); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn + .btn { margin-top: .6rem; }
+
+  /* ── lobby ── */
+  .lobby-header {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 1.5rem;
+  }
+  .lobby-title { font-family: var(--font-display); font-size: 1.4rem; }
+  .code-badge {
+    background: rgba(201,168,76,.1);
+    border: 1px solid rgba(201,168,76,.3);
+    border-radius: 3px;
+    padding: .3rem .6rem;
+    font-size: 1.2rem;
+    font-weight: 500;
+    color: var(--gold);
+    letter-spacing: .1em;
+    cursor: pointer;
+  }
+  .code-badge:hover::after { content: " 📋"; }
+
+  #player-list { display: flex; flex-direction: column; gap: .5rem; margin: 1rem 0; min-height: 60px; }
+  .player-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(255,255,255,.03);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    padding: .55rem .85rem;
+    transition: border-color .2s;
+  }
+  .player-chip.me { border-color: rgba(201,168,76,.3); }
+  .chip-name { font-size: .9rem; }
+  .chip-toggle {
+    background: rgba(255,255,255,.06);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: .72rem;
+    padding: .25rem .6rem;
+    cursor: pointer;
+    transition: all .2s;
+  }
+  .chip-toggle.imp {
+    background: rgba(201,76,76,.15);
+    border-color: var(--red);
+    color: var(--red);
+  }
+  .chip-toggle:not(.imp):hover { border-color: var(--red); color: var(--red); }
+  .you-badge {
+    font-size: .65rem; letter-spacing: .15em;
+    color: var(--gold); border: 1px solid rgba(201,168,76,.3);
+    border-radius: 2px; padding: .15rem .4rem;
+  }
+  .spy-count {
+    font-size: .72rem; color: var(--muted); text-align: right;
+    margin-top: -.25rem; margin-bottom: .75rem;
+    letter-spacing: .08em;
+  }
+  #waiting-msg { color: var(--muted); font-size: .8rem; text-align: center; padding: 1rem 0; }
+
+  /* ── reveal ── */
+  #page-reveal { text-align: center; }
+  .reveal-card {
+    border-radius: 4px;
+    padding: 3rem 2rem;
+    margin-bottom: 1.5rem;
+    position: relative;
+    overflow: hidden;
+    animation: revealPop .5s cubic-bezier(.175,.885,.32,1.275);
+  }
+  @keyframes revealPop {
+    from { opacity: 0; transform: scale(.85) translateY(20px); }
+    to   { opacity: 1; transform: scale(1) translateY(0); }
+  }
+  .reveal-card.agent {
+    background: linear-gradient(145deg, #0d1a12, #0a1410);
+    border: 1px solid rgba(76,201,148,.3);
+  }
+  .reveal-card.agent::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 0%, rgba(76,201,148,.12), transparent 60%);
+  }
+  .reveal-card.impostor {
+    background: linear-gradient(145deg, #1a0d0d, #140a0a);
+    border: 1px solid rgba(201,76,76,.3);
+  }
+  .reveal-card.impostor::before {
+    content: ""; position: absolute; inset: 0;
+    background: radial-gradient(ellipse at 50% 0%, rgba(201,76,76,.12), transparent 60%);
+  }
+  #reveal-label {
+    font-size: .7rem; letter-spacing: .3em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: .75rem; position: relative;
+  }
+  #reveal-word {
+    font-family: var(--font-display);
+    font-size: clamp(2.5rem, 10vw, 4rem);
+    font-weight: 900;
+    line-height: 1;
+    margin-bottom: .75rem;
+    position: relative;
+  }
+  .agent #reveal-word { color: var(--green); text-shadow: 0 0 40px rgba(76,201,148,.4); }
+  .impostor #reveal-word { color: var(--red); text-shadow: 0 0 40px rgba(201,76,76,.4); }
+  #reveal-sub { color: var(--muted); font-size: .82rem; position: relative; }
+
+  /* ── toast ── */
+  .toast {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%) translateY(4rem);
+    background: var(--card); border: 1px solid var(--border); border-radius: 3px;
+    padding: .6rem 1.25rem; font-size: .82rem; color: var(--text);
+    transition: transform .3s ease, opacity .3s ease; opacity: 0; z-index: 999;
+    white-space: nowrap; pointer-events: none;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  .toast.error { border-color: var(--red); color: var(--red); }
+
+  /* ── misc ── */
+  .section-title {
+    font-size: .7rem; letter-spacing: .2em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: .75rem;
+  }
+  .host-section {
+    background: rgba(201,168,76,.04);
+    border: 1px solid rgba(201,168,76,.15);
+    border-radius: 3px;
+    padding: 1.25rem;
+    margin-top: 1rem;
+  }
+  .rules-link { color: var(--muted); font-size: .72rem; text-align: center; margin-top: 1.25rem; letter-spacing: .05em; }
+
+  /* config panel */
+  #firebase-warning {
+    background: rgba(201,76,76,.08); border: 1px solid rgba(201,76,76,.25);
+    border-radius: 3px; padding: .85rem 1rem; margin-bottom: 1.25rem;
+    font-size: .78rem; color: #e07070; line-height: 1.5;
+  }
+  #firebase-warning strong { color: var(--red); display: block; margin-bottom: .25rem; }
+  code {
+    background: rgba(255,255,255,.07); border-radius: 2px;
+    padding: .1em .35em; font-family: var(--font-mono); font-size: .85em;
+  }
+</style>
+
+</head>
+<body>
+
+<!-- ══ HOME ══════════════════════════════════════════════════════════════ -->
+
+<div id="page-home" class="page active">
+  <div class="logo">
+    <span class="logo-eye">🔍</span>
+    <h1>WordSpy</h1>
+    <p>Find the spy. Don't get caught.</p>
+  </div>
+
+  <div id="firebase-warning">
+    <strong>⚠ Setup Required</strong>
+    Open this file's <code>&lt;script&gt;</code> block and replace
+    <code>firebaseConfig</code> with your Firebase project credentials.
+    <a href="https://console.firebase.google.com/" target="_blank" style="color:var(--gold);text-decoration:none;"> Firebase Console →</a>
+  </div>
+
+  <div class="card">
+    <div class="section-title">Create a room</div>
+    <div class="field">
+      <label>Your name</label>
+      <input id="h-name" type="text" placeholder="Agent name…" maxlength="20">
+    </div>
+    <button id="btn-create" class="btn btn-primary" onclick="createRoom()">Create Room</button>
+
+```
+<div class="divider">or join</div>
+
+<div class="field">
+  <label>Your name</label>
+  <input id="j-name" type="text" placeholder="Agent name…" maxlength="20">
+</div>
+<div class="field">
+  <label>Room code</label>
+  <input id="j-code" type="text" placeholder="ABCD" maxlength="6">
+</div>
+<button id="btn-join" class="btn btn-ghost" onclick="joinRoom()">Join Room</button>
+```
+
+  </div>
+
+  <div class="rules-link">
+    🕵️ Host picks a word · Marks the spies · Start · Spies get no word
+  </div>
+</div>
+
+<!-- ══ LOBBY ══════════════════════════════════════════════════════════════ -->
+
+<div id="page-lobby" class="page">
+  <div class="card">
+    <div class="lobby-header">
+      <div>
+        <div class="section-title">Room code</div>
+        <div class="code-badge" id="lobby-code" onclick="navigator.clipboard?.writeText(this.textContent);toast('Copied!','info')">----</div>
+      </div>
+      <button class="btn btn-ghost" style="width:auto;padding:.4rem .85rem;font-size:.72rem" onclick="leaveGame()">Leave</button>
+    </div>
+
+```
+<div class="section-title">Players</div>
+<div id="player-list"></div>
+<div class="spy-count" id="spy-count">0 spies marked</div>
+
+<!-- HOST ONLY -->
+<div id="host-controls">
+  <div class="host-section">
+    <div class="section-title">Host controls</div>
+    <div class="field">
+      <label>Secret word</label>
+      <input id="game-word" type="text" placeholder="e.g. Piano, Mars, Sushi…" maxlength="30">
+    </div>
+    <button class="btn btn-primary" onclick="startGame()">🚀 Start Game</button>
+  </div>
+</div>
+
+<div id="waiting-msg">Waiting for the host to start the game…</div>
+```
+
+  </div>
+</div>
+
+<!-- ══ REVEAL ══════════════════════════════════════════════════════════════ -->
+
+<div id="page-reveal" class="page">
+  <div id="reveal-card" class="reveal-card agent">
+    <div id="reveal-label">THE WORD IS</div>
+    <div id="reveal-word">PIANO</div>
+    <div id="reveal-sub">Give a clue. One word. Don't make it obvious.</div>
+  </div>
+
+  <div id="host-reveal-controls" style="display:none">
+    <button class="btn btn-primary" onclick="newRound()">🔄 New Round</button>
+  </div>
+  <button class="btn btn-ghost" onclick="leaveGame()" style="margin-top:.5rem">Leave Game</button>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// Show new-round button for host on reveal page
+const _origShow = window.showWordReveal;
+// patch after module loads
+document.addEventListener("DOMContentLoaded", () => {});
+
+// We need to patch after ES module runs; use a MutationObserver trick
+const _observer = new MutationObserver(() => {
+  const el = document.getElementById("host-reveal-controls");
+  if (el && window.STATE) {
+    el.style.display = window.STATE.isHost ? "block" : "none";
+  }
+});
+_observer.observe(document.getElementById("page-reveal"), { attributes: true, attributeFilter: ["class"] });
+</script>
+
+</body>
+</html>
