@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Most Likely To</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;700;800&family=Syne+Mono&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, update, remove }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ─── PASTE YOUR FIREBASE CONFIG HERE ───────────────────────────────────────
+const firebaseConfig = {
+  apiKey:            "YOUR_API_KEY",
+  authDomain:        "YOUR_PROJECT.firebaseapp.com",
+  databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId:         "YOUR_PROJECT",
+  storageBucket:     "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId:             "YOUR_APP_ID"
+};
+// ───────────────────────────────────────────────────────────────────────────
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+// ── utils ────────────────────────────────────────────────────────
+function uid()      { return Math.random().toString(36).slice(2, 9); }
+function roomCode() { return Math.random().toString(36).slice(2, 6).toUpperCase(); }
+function rref(...path) { return ref(db, path.join("/")); }
+function mlt_rref(code, ...path) { return rref("mlt_rooms", code, ...path); }
+
+// ── state ────────────────────────────────────────────────────────
+let S = { code: null, myId: null, myName: null, isHost: false };
+let _unsub = null;
+
+// ── ui helpers ───────────────────────────────────────────────────
+function page(id) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+}
+function toast(msg, type = "info") {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast show " + type;
+  clearTimeout(window._tt);
+  window._tt = setTimeout(() => t.classList.remove("show"), 3000);
+}
+function btn(id, loading) {
+  const b = document.getElementById(id);
+  b.disabled = loading;
+  b.dataset.orig = b.dataset.orig || b.textContent;
+  b.textContent = loading ? "…" : b.dataset.orig;
+}
+
+// ── HOME ─────────────────────────────────────────────────────────
+window.createRoom = async () => {
+  const name = document.getElementById("h-name").value.trim();
+  const reveal = document.getElementById("reveal-mode").checked;
+  if (!name) return toast("Enter your name", "error");
+  btn("btn-create", true);
+  const code = roomCode();
+  const myId = uid();
+  await set(rref("mlt_rooms", code), {
+    host: myId,
+    phase: "lobby",       // lobby | question | voting | results | reveal
+    revealMode: reveal,
+    question: "",
+    players: { [myId]: { name } },
+    votes: {}
+  });
+  S = { code, myId, myName: name, isHost: true };
+  btn("btn-create", false);
+  enterLobby();
+};
+
+window.joinRoom = async () => {
+  const name = document.getElementById("j-name").value.trim();
+  const code = document.getElementById("j-code").value.trim().toUpperCase();
+  if (!name || !code) return toast("Fill both fields", "error");
+  btn("btn-join", true);
+  const snap = await get(rref("mlt_rooms", code));
+  if (!snap.exists()) { btn("btn-join", false); return toast("Room not found", "error"); }
+  const room = snap.val();
+  if (room.phase !== "lobby") { btn("btn-join", false); return toast("Game already started", "error"); }
+  const myId = uid();
+  await update(rref("mlt_rooms", code, "players", myId), { name });
+  S = { code, myId, myName: name, isHost: false };
+  btn("btn-join", false);
+  enterLobby();
+};
+
+// ── LOBBY ────────────────────────────────────────────────────────
+function enterLobby() {
+  page("page-lobby");
+  document.getElementById("lobby-code").textContent = S.code;
+  document.getElementById("lob-host-controls").style.display = S.isHost ? "block" : "none";
+  document.getElementById("lob-wait").style.display = S.isHost ? "none" : "block";
+  if (_unsub) _unsub();
+  _unsub = onValue(rref("mlt_rooms", S.code), snap => {
+    if (!snap.exists()) return;
+    const room = snap.val();
+    renderLobbyPlayers(room.players || {});
+    if (room.phase === "question") goQuestion(room);
+  });
+}
+
+function renderLobbyPlayers(players) {
+  document.getElementById("lob-players").innerHTML =
+    Object.values(players).map(p => `<div class="pill">${p.name}</div>`).join("");
+  document.getElementById("lob-count").textContent =
+    `${Object.keys(players).length} player${Object.keys(players).length !== 1 ? "s" : ""} joined`;
+}
+
+window.startQuestion = async () => {
+  const q = document.getElementById("question-input").value.trim();
+  if (!q) return toast("Type a question first", "error");
+  await update(rref("mlt_rooms", S.code), { phase: "question", question: q, votes: {} });
+};
+
+// ── QUESTION / VOTING ────────────────────────────────────────────
+let _myVote = null;
+
+function goQuestion(room) {
+  _myVote = null;
+  page("page-question");
+  document.getElementById("q-text").textContent = room.question;
+  if (_unsub) _unsub();
+  _unsub = onValue(rref("mlt_rooms", S.code), snap => {
+    if (!snap.exists()) return;
+    const r = snap.val();
+    renderVotingPlayers(r.players || {}, r.votes || {});
+    if (r.phase === "results") goResults(r);
+    if (r.phase === "reveal")  goReveal(r);
+    if (r.phase === "lobby")   enterLobby();
+  });
+  renderVotingPlayers(room.players || {}, room.votes || {});
+}
+
+function renderVotingPlayers(players, votes) {
+  // count votes
+  const counts = {};
+  Object.values(votes).forEach(v => { counts[v] = (counts[v] || 0) + 1; });
+  const totalVoters = Object.keys(players).length;
+  const totalVotes  = Object.keys(votes).length;
+
+  // voted status for me
+  const iVoted = votes[S.myId] !== undefined;
+
+  document.getElementById("vote-status").textContent =
+    `${totalVotes} / ${totalVoters} voted`;
+
+  // player list to vote on (exclude self)
+  const others = Object.entries(players).filter(([id]) => id !== S.myId);
+
+  document.getElementById("vote-list").innerHTML = others.map(([id, p]) => {
+    const isMe = id === S.myId;
+    const myChoice = votes[S.myId] === id;
+    return `<button class="vote-btn ${myChoice ? "chosen" : ""} ${iVoted && !myChoice ? "dimmed" : ""}"
+      onclick="castVote('${id}')" ${iVoted ? "disabled" : ""}>
+      ${p.name}
+      ${myChoice ? '<span class="vote-check">✓ your vote</span>' : ""}
+    </button>`;
+  }).join("");
+
+  // host reveal button
+  const hostBar = document.getElementById("host-bar");
+  if (S.isHost) {
+    hostBar.style.display = "flex";
+    const revealBtn = document.getElementById("btn-reveal-results");
+    revealBtn.disabled = totalVotes < 1;
+  } else {
+    hostBar.style.display = "none";
+  }
+}
+
+window.castVote = async (targetId) => {
+  if (_myVote) return;
+  _myVote = targetId;
+  await update(rref("mlt_rooms", S.code, "votes"), { [S.myId]: targetId });
+};
+
+window.showResults = async () => {
+  await update(rref("mlt_rooms", S.code), { phase: "results" });
+};
+
+// ── RESULTS ──────────────────────────────────────────────────────
+function goResults(room) {
+  page("page-results");
+  const players = room.players || {};
+  const votes   = room.votes   || {};
+
+  // tally
+  const counts = {};
+  Object.entries(votes).forEach(([, v]) => { counts[v] = (counts[v] || 0) + 1; });
+
+  // sort players by votes desc
+  const sorted = Object.entries(players)
+    .map(([id, p]) => ({ id, name: p.name, count: counts[id] || 0 }))
+    .filter(p => p.id !== S.myId || true) // include all
+    .sort((a, b) => b.count - a.count);
+
+  const max = sorted[0]?.count || 0;
+
+  document.getElementById("results-question").textContent = room.question;
+  document.getElementById("results-list").innerHTML = sorted.map((p, i) => {
+    const pct = max > 0 ? Math.round((p.count / max) * 100) : 0;
+    const winner = p.count === max && max > 0;
+    return `
+      <div class="result-row ${winner ? "winner" : ""}">
+        <div class="result-name">${winner ? "👑 " : ""}${p.name}</div>
+        <div class="result-bar-wrap">
+          <div class="result-bar" style="width:${pct}%;animation-delay:${i * 0.08}s"></div>
+        </div>
+        <div class="result-count">${p.count}</div>
+      </div>`;
+  }).join("");
+
+  const hostActions = document.getElementById("results-host-actions");
+  if (S.isHost) {
+    hostActions.style.display = "flex";
+    document.getElementById("btn-do-reveal").style.display = room.revealMode ? "block" : "none";
+  } else {
+    hostActions.style.display = "none";
+  }
+
+  // non-host: listen for next phase
+  if (_unsub) _unsub();
+  _unsub = onValue(rref("mlt_rooms", S.code), snap => {
+    if (!snap.exists()) return;
+    const r = snap.val();
+    if (r.phase === "reveal") goReveal(r);
+    if (r.phase === "lobby")  enterLobby();
+    if (r.phase === "question") goQuestion(r);
+  });
+}
+
+window.doReveal = async () => {
+  await update(rref("mlt_rooms", S.code), { phase: "reveal" });
+};
+
+// ── REVEAL ───────────────────────────────────────────────────────
+function goReveal(room) {
+  page("page-reveal");
+  const players = room.players || {};
+  const votes   = room.votes   || {};
+
+  document.getElementById("reveal-question").textContent = room.question;
+
+  // group by target
+  const grouped = {};
+  Object.entries(votes).forEach(([voterId, targetId]) => {
+    if (!grouped[targetId]) grouped[targetId] = [];
+    grouped[targetId].push(players[voterId]?.name || "?");
+  });
+
+  // sort by votes
+  const sorted = Object.entries(grouped)
+    .map(([id, voters]) => ({ name: players[id]?.name || "?", voters, count: voters.length }))
+    .sort((a, b) => b.count - a.count);
+
+  document.getElementById("reveal-list").innerHTML = sorted.map((entry, i) => `
+    <div class="reveal-row" style="animation-delay:${i * 0.1}s">
+      <div class="reveal-target">${entry.name} <span class="reveal-ct">${entry.count} vote${entry.count !== 1 ? "s" : ""}</span></div>
+      <div class="reveal-voters">voted by: ${entry.voters.join(", ")}</div>
+    </div>`).join("");
+
+  const hostAct = document.getElementById("reveal-host-actions");
+  hostAct.style.display = S.isHost ? "flex" : "none";
+
+  if (_unsub) _unsub();
+  _unsub = onValue(rref("mlt_rooms", S.code, "phase"), snap => {
+    if (snap.val() === "lobby")    enterLobby();
+    if (snap.val() === "question") {
+      get(rref("mlt_rooms", S.code)).then(s => goQuestion(s.val()));
+    }
+  });
+}
+
+window.nextQuestion = async () => {
+  document.getElementById("question-input").value = "";
+  await update(rref("mlt_rooms", S.code), { phase: "lobby", question: "", votes: {} });
+};
+
+window.leaveGame = () => {
+  if (_unsub) _unsub();
+  S = { code: null, myId: null, myName: null, isHost: false };
+  page("page-home");
+};
+</script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:     #faf7f2;
+    --ink:    #1a1612;
+    --card:   #ffffff;
+    --border: #e8e0d0;
+    --accent: #ff4d00;
+    --accent2:#ff8c42;
+    --muted:  #9a9080;
+    --yellow: #ffd166;
+    --green:  #06d6a0;
+    --font:   'Syne', sans-serif;
+    --mono:   'Syne Mono', monospace;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--font);
+    min-height: 100dvh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background-image:
+      radial-gradient(circle at 10% 20%, rgba(255,77,0,.06) 0%, transparent 40%),
+      radial-gradient(circle at 90% 80%, rgba(255,209,102,.12) 0%, transparent 40%);
+  }
+
+  .page { display: none; width: 100%; max-width: 460px; animation: up .35s ease; }
+  .page.active { display: block; }
+  @keyframes up {
+    from { opacity: 0; transform: translateY(14px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── logo ── */
+  .logo { margin-bottom: 1.75rem; }
+  .logo h1 {
+    font-size: clamp(2.2rem, 9vw, 3rem);
+    font-weight: 800;
+    line-height: .95;
+    letter-spacing: -.03em;
+  }
+  .logo h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+  .logo p { color: var(--muted); font-size: .8rem; margin-top: .4rem; font-family: var(--mono); }
+
+  /* ── card ── */
+  .card {
+    background: var(--card);
+    border: 2px solid var(--ink);
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 4px 4px 0 var(--ink);
+  }
+
+  /* ── section label ── */
+  .sec { font-family: var(--mono); font-size: .68rem; color: var(--muted); letter-spacing: .15em; text-transform: uppercase; margin-bottom: .6rem; }
+
+  /* ── inputs ── */
+  .field { margin-bottom: .9rem; }
+  label { display: block; font-family: var(--mono); font-size: .7rem; color: var(--muted); letter-spacing: .1em; text-transform: uppercase; margin-bottom: .35rem; }
+  input[type=text], textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 2px solid var(--border);
+    border-radius: 6px;
+    color: var(--ink);
+    font-family: var(--font);
+    font-size: .95rem;
+    padding: .6rem .85rem;
+    outline: none;
+    transition: border-color .15s;
+    resize: none;
+  }
+  input[type=text]:focus, textarea:focus { border-color: var(--accent); }
+  input[type=text]::placeholder, textarea::placeholder { color: var(--muted); }
+
+  /* toggle */
+  .toggle-row {
+    display: flex; align-items: center; gap: .65rem;
+    font-size: .85rem; margin-bottom: 1rem; cursor: pointer;
+  }
+  .toggle-row input[type=checkbox] {
+    width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer;
+  }
+
+  /* ── buttons ── */
+  .btn {
+    display: block; width: 100%;
+    padding: .7rem 1.25rem;
+    border: 2px solid var(--ink);
+    border-radius: 6px;
+    font-family: var(--font);
+    font-size: .88rem;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all .15s;
+    text-align: center;
+  }
+  .btn + .btn { margin-top: .6rem; }
+  .btn-primary {
+    background: var(--accent); color: #fff;
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .btn-primary:hover:not(:disabled) { transform: translate(-1px,-1px); box-shadow: 4px 4px 0 var(--ink); }
+  .btn-primary:active:not(:disabled) { transform: translate(2px,2px); box-shadow: 1px 1px 0 var(--ink); }
+  .btn-outline {
+    background: transparent; color: var(--ink);
+    box-shadow: 3px 3px 0 var(--ink);
+  }
+  .btn-outline:hover:not(:disabled) { background: var(--yellow); }
+  .btn-ghost {
+    background: transparent; color: var(--muted);
+    border-color: var(--border); box-shadow: none; font-weight: 400;
+  }
+  .btn-ghost:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+  .btn:disabled { opacity: .45; cursor: not-allowed; box-shadow: none; }
+
+  /* divider */
+  .divider {
+    display: flex; align-items: center; gap: .75rem;
+    color: var(--muted); font-family: var(--mono); font-size: .7rem;
+    letter-spacing: .15em; text-transform: uppercase; margin: 1.25rem 0;
+  }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  /* ── code badge ── */
+  .code-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
+  .code-badge {
+    font-family: var(--mono); font-size: 1.6rem; font-weight: 700;
+    background: var(--yellow); border: 2px solid var(--ink);
+    border-radius: 6px; padding: .25rem .75rem;
+    box-shadow: 3px 3px 0 var(--ink); cursor: pointer; letter-spacing: .1em;
+    transition: all .15s;
+  }
+  .code-badge:hover { transform: translate(-1px,-1px); box-shadow: 4px 4px 0 var(--ink); }
+
+  /* ── lobby pills ── */
+  #lob-players { display: flex; flex-wrap: wrap; gap: .45rem; margin: .75rem 0; min-height: 36px; }
+  .pill {
+    background: var(--bg); border: 2px solid var(--border);
+    border-radius: 20px; padding: .3rem .75rem;
+    font-size: .82rem; font-weight: 700;
+  }
+  #lob-count { font-family: var(--mono); font-size: .72rem; color: var(--muted); margin-bottom: .75rem; }
+  #lob-wait { font-family: var(--mono); font-size: .8rem; color: var(--muted); text-align: center; padding: .75rem 0; }
+
+  /* ── question page ── */
+  .q-label { font-family: var(--mono); font-size: .7rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
+  #q-text {
+    font-size: clamp(1.3rem, 5vw, 1.7rem); font-weight: 800; line-height: 1.2;
+    margin-bottom: 1.5rem; color: var(--ink);
+  }
+  #vote-status { font-family: var(--mono); font-size: .75rem; color: var(--muted); margin-bottom: 1rem; }
+  #vote-list { display: flex; flex-direction: column; gap: .5rem; }
+  .vote-btn {
+    background: var(--card); border: 2px solid var(--border);
+    border-radius: 6px; padding: .75rem 1rem;
+    font-family: var(--font); font-size: .95rem; font-weight: 700;
+    cursor: pointer; text-align: left;
+    transition: all .15s; color: var(--ink);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .vote-btn:hover:not(:disabled) { border-color: var(--accent); background: #fff5f2; }
+  .vote-btn.chosen { border-color: var(--accent); background: #fff0eb; box-shadow: 3px 3px 0 var(--accent); }
+  .vote-btn.dimmed { opacity: .35; }
+  .vote-btn:disabled { cursor: default; }
+  .vote-check { font-family: var(--mono); font-size: .68rem; color: var(--accent); }
+
+  #host-bar {
+    display: none; margin-top: 1.25rem;
+    gap: .75rem; flex-direction: column;
+  }
+
+  /* ── results ── */
+  #results-question {
+    font-size: 1.1rem; font-weight: 800; margin-bottom: 1.25rem;
+    padding-bottom: 1rem; border-bottom: 2px solid var(--border);
+  }
+  #results-list { display: flex; flex-direction: column; gap: .65rem; margin-bottom: 1.25rem; }
+  .result-row { display: flex; align-items: center; gap: .75rem; }
+  .result-name { font-weight: 700; font-size: .9rem; min-width: 80px; }
+  .result-bar-wrap { flex: 1; background: var(--border); border-radius: 4px; height: 10px; overflow: hidden; }
+  .result-bar {
+    height: 100%; background: var(--accent); border-radius: 4px;
+    width: 0; animation: barGrow .5s ease forwards;
+  }
+  @keyframes barGrow { to { width: var(--w, 100%); } }
+  .result-bar { animation: barGrow .6s cubic-bezier(.22,1,.36,1) forwards; }
+  .result-count { font-family: var(--mono); font-size: .85rem; font-weight: 700; min-width: 20px; text-align: right; }
+  .result-row.winner .result-name { color: var(--accent); }
+  .result-row.winner .result-bar { background: var(--accent); }
+
+  #results-host-actions { display: none; flex-direction: column; gap: .5rem; }
+
+  /* ── reveal ── */
+  #reveal-question {
+    font-size: 1.05rem; font-weight: 800; margin-bottom: 1.25rem;
+    padding-bottom: 1rem; border-bottom: 2px solid var(--border);
+  }
+  #reveal-list { display: flex; flex-direction: column; gap: .85rem; margin-bottom: 1.25rem; }
+  .reveal-row {
+    background: var(--bg); border: 2px solid var(--border); border-radius: 6px;
+    padding: .85rem 1rem; animation: up .4s ease both;
+  }
+  .reveal-target { font-weight: 800; font-size: 1rem; margin-bottom: .25rem; }
+  .reveal-ct { font-family: var(--mono); font-size: .75rem; color: var(--accent); margin-left: .5rem; }
+  .reveal-voters { font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+
+  #reveal-host-actions { display: none; flex-direction: column; gap: .5rem; margin-top: 0; }
+
+  /* ── toast ── */
+  .toast {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%) translateY(4rem);
+    background: var(--ink); color: var(--bg);
+    border-radius: 6px; padding: .55rem 1.25rem;
+    font-family: var(--mono); font-size: .8rem;
+    transition: transform .3s, opacity .3s; opacity: 0; z-index: 99;
+    pointer-events: none; white-space: nowrap;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  .toast.error { background: var(--accent); }
+</style>
+
+</head>
+<body>
+
+<!-- ══ HOME ══════════════════════════════════════════════════════ -->
+
+<div id="page-home" class="page active">
+  <div class="logo">
+    <h1>Most<br><em>Likely To</em></h1>
+    <p>Point fingers. Own it.</p>
+  </div>
+
+  <div class="card">
+    <div class="sec">Create a room</div>
+    <div class="field">
+      <label>Your name</label>
+      <input id="h-name" type="text" placeholder="What do they call you?" maxlength="20">
+    </div>
+    <label class="toggle-row">
+      <input id="reveal-mode" type="checkbox">
+      Enable "who voted for who" reveal at end of each round
+    </label>
+    <button id="btn-create" class="btn btn-primary" onclick="createRoom()">Create Room</button>
+<div class="divider">or join</div>
+
+<div class="field">
+  <label>Your name</label>
+  <input id="j-name" type="text" placeholder="What do they call you?" maxlength="20">
+</div>
+<div class="field">
+  <label>Room code</label>
+  <input id="j-code" type="text" placeholder="ABCD" maxlength="6">
+</div>
+<button id="btn-join" class="btn btn-outline" onclick="joinRoom()">Join Room</button>
+
+
+  </div>
+</div>
+
+<!-- ══ LOBBY ══════════════════════════════════════════════════════ -->
+
+<div id="page-lobby" class="page">
+  <div class="logo">
+    <h1>Most<br><em>Likely To</em></h1>
+  </div>
+  <div class="card">
+    <div class="code-row">
+      <div>
+        <div class="sec">Room code — share this</div>
+        <div class="code-badge" id="lobby-code"
+          onclick="navigator.clipboard?.writeText(this.textContent); toast('Copied!')">
+          ----
+        </div>
+      </div>
+      <button class="btn btn-ghost" style="width:auto;padding:.4rem .85rem;font-size:.75rem" onclick="leaveGame()">Leave</button>
+    </div>
+
+
+<div class="sec">Players</div>
+<div id="lob-players"></div>
+<div id="lob-count">0 players joined</div>
+
+<div id="lob-host-controls">
+  <div class="sec" style="margin-top:.5rem">Question</div>
+  <div class="field">
+    <textarea id="question-input" rows="2" placeholder="Most likely to forget someone's name 30 seconds after meeting them…"></textarea>
+  </div>
+  <button class="btn btn-primary" onclick="startQuestion()">Ask This →</button>
+</div>
+<div id="lob-wait">Waiting for the host to ask a question…</div>
+
+
+  </div>
+</div>
+
+<!-- ══ QUESTION / VOTING ══════════════════════════════════════════ -->
+
+<div id="page-question" class="page">
+  <div class="logo">
+    <h1>Most<br><em>Likely To…</em></h1>
+  </div>
+  <div class="card">
+    <div class="q-label">Who is most likely to…</div>
+    <div id="q-text"></div>
+    <div id="vote-status">0 / 0 voted</div>
+    <div id="vote-list"></div>
+
+
+<div id="host-bar">
+  <button id="btn-reveal-results" class="btn btn-primary" onclick="showResults()">Show Results →</button>
+</div>
+
+
+  </div>
+  <button class="btn btn-ghost" style="margin-top:.75rem" onclick="leaveGame()">Leave</button>
+</div>
+
+<!-- ══ RESULTS ════════════════════════════════════════════════════ -->
+
+<div id="page-results" class="page">
+  <div class="logo">
+    <h1><em>Results</em></h1>
+  </div>
+  <div class="card">
+    <div class="sec">Most likely to…</div>
+    <div id="results-question"></div>
+    <div id="results-list"></div>
+    <div id="results-host-actions">
+      <button id="btn-do-reveal" class="btn btn-outline" onclick="doReveal()">👀 Reveal Who Voted</button>
+      <button class="btn btn-primary" onclick="nextQuestion()">Next Question →</button>
+    </div>
+  </div>
+  <button class="btn btn-ghost" style="margin-top:.75rem" onclick="leaveGame()">Leave</button>
+</div>
+
+<!-- ══ REVEAL ═════════════════════════════════════════════════════ -->
+
+<div id="page-reveal" class="page">
+  <div class="logo">
+    <h1><em>Who voted?</em></h1>
+  </div>
+  <div class="card">
+    <div class="sec">Most likely to…</div>
+    <div id="reveal-question"></div>
+    <div id="reveal-list"></div>
+    <div id="reveal-host-actions">
+      <button class="btn btn-primary" onclick="nextQuestion()">Next Question →</button>
+    </div>
+  </div>
+  <button class="btn btn-ghost" style="margin-top:.75rem" onclick="leaveGame()">Leave</button>
+</div>
+
+<div id="toast" class="toast"></div>
+</body>
+</html>
