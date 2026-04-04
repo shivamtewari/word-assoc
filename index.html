@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Party Games</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+–bg:    #0d0d0d;
+–gold:  #c9a84c;
+–orange:#ff4d00;
+–white: #f5f0e8;
+–muted: #555;
+}
+
+html, body { min-height: 100dvh; background: var(–bg); color: var(–white); font-family: ‘DM Sans’, sans-serif; }
+
+/* subtle grid */
+body::after {
+content: “”;
+position: fixed; inset: 0; z-index: 0;
+background-image:
+linear-gradient(rgba(255,255,255,.025) 1px, transparent 1px),
+linear-gradient(90deg, rgba(255,255,255,.025) 1px, transparent 1px);
+background-size: 48px 48px;
+pointer-events: none;
+}
+
+.wrap {
+position: relative; z-index: 1;
+min-height: 100dvh;
+display: flex; flex-direction: column;
+align-items: center; justify-content: center;
+padding: 2.5rem 1.25rem;
+gap: 3rem;
+}
+
+/* ── header ── */
+header { text-align: center; }
+.eyebrow {
+font-size: .68rem; letter-spacing: .35em; text-transform: uppercase;
+color: var(–muted); margin-bottom: .85rem;
+}
+h1 {
+font-family: ‘Bebas Neue’, sans-serif;
+font-size: clamp(3.5rem, 16vw, 7.5rem);
+line-height: .88; letter-spacing: .02em;
+}
+h1 .line1 {
+display: block;
+background: linear-gradient(160deg, #fff 0%, #999 100%);
+-webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+h1 .line2 {
+display: block;
+background: linear-gradient(160deg, var(–gold) 0%, #e8902a 100%);
+-webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;
+}
+.tagline { margin-top: .9rem; color: var(–muted); font-size: .82rem; letter-spacing: .06em; }
+
+/* ── game cards ── */
+.games {
+display: grid;
+grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+gap: 1.1rem;
+width: 100%; max-width: 640px;
+}
+
+.game-card {
+display: block; text-decoration: none; color: inherit;
+border-radius: 6px; overflow: hidden; position: relative;
+border: 1px solid rgba(255,255,255,.07);
+transition: transform .2s ease, box-shadow .2s ease;
+animation: cardIn .5s ease both;
+}
+.game-card:nth-child(1) { animation-delay: .1s; }
+.game-card:nth-child(2) { animation-delay: .2s; }
+@keyframes cardIn {
+from { opacity: 0; transform: translateY(18px); }
+to   { opacity: 1; transform: translateY(0); }
+}
+.game-card:hover { transform: translateY(-5px); box-shadow: 0 24px 60px rgba(0,0,0,.6); }
+.game-card:hover .card-arrow { transform: translateX(4px); }
+
+.card-body { padding: 1.85rem 1.75rem; position: relative; z-index: 1; }
+
+/* wordspy */
+.card-wordspy {
+background: linear-gradient(150deg, #111118 0%, #0a0a0f 100%);
+}
+.card-wordspy::before {
+content: “”;
+position: absolute; inset: 0;
+background: radial-gradient(ellipse 90% 55% at 50% 0%, rgba(201,168,76,.14), transparent 70%);
+pointer-events: none;
+}
+
+/* most likely to */
+.card-mlt {
+background: linear-gradient(150deg, #1a0e00 0%, #0f0800 100%);
+}
+.card-mlt::before {
+content: “”;
+position: absolute; inset: 0;
+background: radial-gradient(ellipse 90% 55% at 50% 0%, rgba(255,77,0,.13), transparent 70%);
+pointer-events: none;
+}
+
+.card-icon { font-size: 2rem; margin-bottom: .9rem; display: block; }
+
+.card-title {
+font-family: ‘Bebas Neue’, sans-serif;
+font-size: 2rem; letter-spacing: .04em; line-height: 1;
+margin-bottom: .5rem;
+}
+.card-wordspy .card-title { color: var(–gold); }
+.card-mlt     .card-title { color: var(–orange); }
+
+.card-desc {
+font-size: .82rem; color: rgba(245,240,232,.5);
+line-height: 1.5; margin-bottom: 1.25rem;
+}
+
+.card-btn {
+display: inline-flex; align-items: center; gap: .5rem;
+font-size: .78rem; font-weight: 700; letter-spacing: .1em;
+text-transform: uppercase; padding: .55rem 1rem;
+border-radius: 4px; border: none; cursor: pointer;
+font-family: ‘DM Sans’, sans-serif;
+text-decoration: none;
+}
+.card-wordspy .card-btn { background: var(–gold);   color: #0a0a0f; }
+.card-mlt     .card-btn { background: var(–orange); color: #fff; }
+.card-arrow { transition: transform .2s ease; }
+
+/* ── footer ── */
+footer {
+color: var(–muted); font-size: .7rem; letter-spacing: .08em;
+text-align: center;
+}
+</style>
+
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">🎉 pick a game</div>
+    <h1>
+      <span class="line1">Party</span>
+      <span class="line2">Games</span>
+    </h1>
+    <p class="tagline">Grab your phone. Everyone plays.</p>
+  </header>
+
+  <div class="games">
+
+```
+<a class="game-card card-wordspy" href="wordspy/">
+  <div class="card-body">
+    <span class="card-icon">🔍</span>
+    <div class="card-title">WordSpy</div>
+    <p class="card-desc">Everyone gets the same secret word — except the spy. Give clues, find the impostor before they blend in.</p>
+    <span class="card-btn">Play now <span class="card-arrow">→</span></span>
+  </div>
+</a>
+
+<a class="game-card card-mlt" href="mostlikelyto/">
+  <div class="card-body">
+    <span class="card-icon">👆</span>
+    <div class="card-title">Most Likely To</div>
+    <p class="card-desc">The host asks a question. Everyone secretly votes. Who did your friends really pick? Find out.</p>
+    <span class="card-btn">Play now <span class="card-arrow">→</span></span>
+  </div>
+</a>
+```
+
+  </div>
+
+  <footer>more games coming soon</footer>
+
+</div>
+</body>
+</html>
