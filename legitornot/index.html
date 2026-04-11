@@ -1,0 +1,746 @@
+<!DOCTYPE html>
+
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Legit or Not</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Anybody:wght@400;700;900&display=swap" rel="stylesheet">
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getDatabase, ref, set, get, onValue, update }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+// ─── PASTE YOUR FIREBASE CONFIG HERE ───────────────────────────────────────
+const firebaseConfig = {
+  apiKey:            "YOUR_API_KEY",
+  authDomain:        "YOUR_PROJECT.firebaseapp.com",
+  databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+  projectId:         "YOUR_PROJECT",
+  storageBucket:     "YOUR_PROJECT.appspot.com",
+  messagingSenderId: "YOUR_SENDER_ID",
+  appId:             "YOUR_APP_ID"
+};
+// ───────────────────────────────────────────────────────────────────────────
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+function rref(code, ...path) { return ref(db, ["lon_rooms", code, ...path].join("/")); }
+function uid()      { return Math.random().toString(36).slice(2, 9); }
+function roomCode() { return Math.random().toString(36).slice(2, 6).toUpperCase(); }
+
+let S = { code: null, myId: null, myName: null, isHost: false };
+let _unsub = null;
+let _currentQIndex = 0;
+
+function page(id) {
+  document.querySelectorAll(".page").forEach(p => p.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+}
+function toast(msg, type = "info") {
+  const t = document.getElementById("toast");
+  t.textContent = msg;
+  t.className = "toast show " + type;
+  clearTimeout(window._tt);
+  window._tt = setTimeout(() => t.classList.remove("show"), 3000);
+}
+function ld(id, on) {
+  const b = document.getElementById(id);
+  b.disabled = on;
+  b.dataset.orig = b.dataset.orig || b.textContent;
+  b.textContent = on ? "…" : b.dataset.orig;
+}
+
+// ── HOME ─────────────────────────────────────────────────────────────────
+window.createRoom = async () => {
+  const name = document.getElementById("h-name").value.trim();
+  const anon = document.getElementById("anon-mode").checked;
+  if (!name) return toast("Enter your name", "error");
+  ld("btn-create", true);
+  const code = roomCode();
+  const myId = uid();
+  await set(ref(db, "lon_rooms/" + code), {
+    host: myId,
+    hostName: name,
+    phase: "lobby",       // lobby | submit | voting | results
+    anonymous: anon,
+    currentQ: 0,
+    players: {},
+    submissions: {},
+    votes: {}
+  });
+  S = { code, myId, myName: name, isHost: true };
+  ld("btn-create", false);
+  enterLobby();
+};
+
+window.joinRoom = async () => {
+  const name = document.getElementById("j-name").value.trim();
+  const code = document.getElementById("j-code").value.trim().toUpperCase();
+  if (!name || !code) return toast("Fill both fields", "error");
+  ld("btn-join", true);
+  const snap = await get(ref(db, "lon_rooms/" + code));
+  if (!snap.exists()) { ld("btn-join", false); return toast("Room not found", "error"); }
+  const room = snap.val();
+  if (room.phase !== "lobby") { ld("btn-join", false); return toast("Game already started", "error"); }
+  const myId = uid();
+  await update(ref(db, `lon_rooms/${code}/players/${myId}`), { name, submitted: false });
+  S = { code, myId, myName: name, isHost: false };
+  ld("btn-join", false);
+  enterLobby();
+};
+
+// ── LOBBY ─────────────────────────────────────────────────────────────────
+function enterLobby() {
+  page("page-lobby");
+  document.getElementById("lobby-code").textContent = S.code;
+  document.getElementById("lob-host-bar").style.display = S.isHost ? "block" : "none";
+  document.getElementById("lob-wait").style.display     = S.isHost ? "none"  : "block";
+  if (_unsub) _unsub();
+  _unsub = onValue(rref(S.code), snap => {
+    if (!snap.exists()) return;
+    const room = snap.val();
+    renderLobbyPlayers(room);
+    if (room.phase === "submit") goSubmit(room);
+    if (room.phase === "voting") goVoting(room);
+  });
+}
+
+function renderLobbyPlayers(room) {
+  const players = room.players || {};
+  const entries = Object.entries(players);
+  const hostChip = `<div class="p-chip host-chip"><span>${room.hostName || "Host"}</span><span class="badge gold">👑 Host</span></div>`;
+  const chips = entries.map(([id, p]) => {
+    const isMe = id === S.myId;
+    return `<div class="p-chip ${isMe ? "me-chip" : ""}"><span>${p.name}</span>${isMe ? '<span class="badge lime">you</span>' : ""}</div>`;
+  }).join("");
+  document.getElementById("lob-players").innerHTML = hostChip + (chips || `<div class="empty-state">Waiting for players…</div>`);
+  document.getElementById("lob-count").textContent = `${entries.length} player${entries.length !== 1 ? "s" : ""} joined`;
+  // host can start once at least 1 player joined
+  const startBtn = document.getElementById("btn-start-submit");
+  if (startBtn) startBtn.disabled = entries.length < 1;
+}
+
+window.startSubmit = async () => {
+  await update(rref(S.code), { phase: "submit" });
+};
+
+// ── SUBMIT ────────────────────────────────────────────────────────────────
+function goSubmit(room) {
+  if (_unsub) { _unsub(); _unsub = null; }
+  page("page-submit");
+
+  // mark as seen, listen for voting start
+  _unsub = onValue(rref(S.code, "phase"), snap => {
+    if (snap.val() === "voting") {
+      get(rref(S.code)).then(s => goVoting(s.val()));
+    }
+  });
+
+  // if already submitted, show waiting screen
+  document.getElementById("submit-form").style.display = "block";
+  document.getElementById("submit-waiting").style.display = "none";
+}
+
+window.submitStatement = async () => {
+  const text = document.getElementById("stmt-input").value.trim();
+  const isReal = document.getElementById("stmt-real").classList.contains("selected");
+  const isFake = document.getElementById("stmt-fake").classList.contains("selected");
+  if (!text) return toast("Write a statement first", "error");
+  if (!isReal && !isFake) return toast("Mark it as Real or Fake", "error");
+  await update(rref(S.code, "submissions"), {
+    [S.myId]: { text, isReal: isReal, authorId: S.myId, authorName: S.myName }
+  });
+  await update(rref(S.code, "players", S.myId), { submitted: true });
+  showSubmitWaiting();
+};
+
+window.skipStatement = async () => {
+  await update(rref(S.code, "players", S.myId), { submitted: true });
+  showSubmitWaiting();
+};
+
+function showSubmitWaiting() {
+  document.getElementById("submit-form").style.display = "none";
+  document.getElementById("submit-waiting").style.display = "flex";
+  // listen for all submitted + host action
+  if (_unsub) _unsub();
+  _unsub = onValue(rref(S.code), snap => {
+    if (!snap.exists()) return;
+    const room = snap.val();
+    const players = room.players || {};
+    const total = Object.keys(players).length;
+    const done  = Object.values(players).filter(p => p.submitted).length;
+    document.getElementById("wait-count").textContent = `${done} / ${total} ready`;
+    // host also submitted tracking
+    if (S.isHost) {
+      document.getElementById("host-start-voting-bar").style.display = "block";
+      document.getElementById("btn-start-voting").disabled = done < 1;
+    }
+    if (room.phase === "voting") goVoting(room);
+  });
+}
+
+// host submits too
+window.hostSubmitStatement = async () => {
+  const text = document.getElementById("stmt-input").value.trim();
+  const isReal = document.getElementById("stmt-real").classList.contains("selected");
+  const isFake = document.getElementById("stmt-fake").classList.contains("selected");
+  if (!text) return toast("Write a statement first", "error");
+  if (!isReal && !isFake) return toast("Mark it as Real or Fake", "error");
+  await update(rref(S.code, "submissions"), {
+    [S.myId]: { text, isReal, authorId: S.myId, authorName: S.myName }
+  });
+  showSubmitWaiting();
+};
+
+window.hostSkip = async () => {
+  showSubmitWaiting();
+};
+
+window.startVoting = async () => {
+  // build ordered question list from submissions
+  const snap = await get(rref(S.code, "submissions"));
+  const subs = snap.val() || {};
+  const qList = Object.values(subs).map((s, i) => ({
+    text: s.text, isReal: s.isReal,
+    authorId: s.authorId, authorName: s.authorName
+  }));
+  await update(rref(S.code), { phase: "voting", currentQ: 0, qList, votes: {} });
+};
+
+// ── VOTING ────────────────────────────────────────────────────────────────
+function goVoting(room) {
+  if (_unsub) { _unsub(); _unsub = null; }
+  const qList = room.qList || [];
+  const idx   = room.currentQ || 0;
+  _currentQIndex = idx;
+
+  if (idx >= qList.length) {
+    // all done
+    return;
+  }
+
+  page("page-voting");
+  const q = qList[idx];
+  document.getElementById("vote-q-num").textContent  = `Statement ${idx + 1} of ${qList.length}`;
+  document.getElementById("vote-q-text").textContent = q.text;
+
+  const myVote = (room.votes || {})[`q${idx}`]?.[S.myId];
+  renderVoteButtons(myVote);
+  renderVoteTally(room.votes || {}, room.players || {}, idx, false);
+
+  document.getElementById("vote-host-bar").style.display = S.isHost ? "flex" : "none";
+
+  _unsub = onValue(rref(S.code), snap => {
+    if (!snap.exists()) return;
+    const r = snap.val();
+    const myV = (r.votes || {})[`q${idx}`]?.[S.myId];
+    renderVoteButtons(myV);
+    renderVoteTally(r.votes || {}, r.players || {}, idx, false);
+    if ((r.currentQ || 0) !== idx) goVoting(r);
+    if (r.phase === "results") goResults(r, idx);
+    if (r.phase === "lobby") enterLobby();
+  });
+}
+
+function renderVoteButtons(myVote) {
+  const legitBtn = document.getElementById("btn-vote-legit");
+  const notBtn   = document.getElementById("btn-vote-not");
+  legitBtn.classList.toggle("chosen-legit", myVote === "legit");
+  notBtn.classList.toggle("chosen-not",     myVote === "not");
+  legitBtn.disabled = !!myVote;
+  notBtn.disabled   = !!myVote;
+}
+
+function renderVoteTally(votes, players, idx, revealed) {
+  const qVotes = votes[`q${idx}`] || {};
+  const total  = Object.keys(players).length + 1; // +1 for host
+  const cast   = Object.keys(qVotes).length;
+  document.getElementById("vote-tally").textContent = `${cast} / ${total} voted`;
+}
+
+window.castVote = async (choice) => {
+  const snap = await get(rref(S.code));
+  const room = snap.val();
+  const idx  = room.currentQ || 0;
+  await update(rref(S.code, "votes", `q${idx}`), { [S.myId]: choice });
+};
+
+window.showQResults = async () => {
+  await update(rref(S.code), { phase: "results" });
+};
+
+// ── RESULTS ───────────────────────────────────────────────────────────────
+function goResults(room, idx) {
+  if (_unsub) { _unsub(); _unsub = null; }
+  page("page-results");
+
+  const qList   = room.qList || [];
+  const q       = qList[idx];
+  const votes   = (room.votes || {})[`q${idx}`] || {};
+  const players = room.players || {};
+  const anon    = room.anonymous;
+
+  document.getElementById("res-q-num").textContent  = `Statement ${idx + 1} of ${qList.length}`;
+  document.getElementById("res-q-text").textContent = q.text;
+
+  // tally
+  let legitCount = 0, notCount = 0;
+  const legitVoters = [], notVoters = [];
+  const allPeople = { ...players, [room.host]: { name: room.hostName } };
+
+  Object.entries(votes).forEach(([pid, v]) => {
+    const name = allPeople[pid]?.name || "?";
+    if (v === "legit") { legitCount++; legitVoters.push(name); }
+    else               { notCount++;   notVoters.push(name); }
+  });
+
+  const total = legitCount + notCount;
+  const legitPct = total > 0 ? Math.round((legitCount / total) * 100) : 0;
+  const notPct   = total > 0 ? Math.round((notCount   / total) * 100) : 0;
+
+  document.getElementById("res-legit-pct").textContent  = `${legitPct}%`;
+  document.getElementById("res-not-pct").textContent    = `${notPct}%`;
+  document.getElementById("res-legit-bar").style.width  = `${legitPct}%`;
+  document.getElementById("res-not-bar").style.width    = `${notPct}%`;
+  document.getElementById("res-legit-voters").textContent = legitVoters.join(", ") || "—";
+  document.getElementById("res-not-voters").textContent   = notVoters.join(", ")   || "—";
+
+  // author reveal
+  const revealSection = document.getElementById("res-author-section");
+  const revealBtn     = document.getElementById("btn-reveal-author");
+  const authorLabel   = document.getElementById("res-author-label");
+
+  if (S.isHost && !anon) {
+    revealSection.style.display = "block";
+    revealBtn.style.display     = "block";
+    authorLabel.style.display   = "none";
+    revealBtn.onclick = () => {
+      authorLabel.textContent = `✍️ Written by ${q.authorName}`;
+      authorLabel.style.display = "block";
+      revealBtn.style.display   = "none";
+      // also show if it was actually real or fake
+      const truth = document.getElementById("res-truth");
+      truth.textContent = q.isReal ? "✅ This was REAL" : "❌ This was FAKE";
+      truth.className   = "truth-label " + (q.isReal ? "real" : "fake");
+      truth.style.display = "block";
+    };
+  } else if (anon) {
+    revealSection.style.display = "block";
+    revealBtn.style.display     = "none";
+    authorLabel.textContent     = "🔒 Anonymous mode — author hidden";
+    authorLabel.style.display   = "block";
+  } else {
+    revealSection.style.display = "none";
+  }
+
+  // always show truth after author reveal for host; for players listen
+  document.getElementById("res-truth").style.display = "none";
+
+  // host controls
+  const hostBar = document.getElementById("res-host-bar");
+  if (S.isHost) {
+    hostBar.style.display = "flex";
+    const hasNext = idx + 1 < qList.length;
+    document.getElementById("btn-next-q").textContent = hasNext ? "Next Statement →" : "Finish Game";
+    document.getElementById("btn-next-q").onclick = hasNext
+      ? async () => { await update(rref(S.code), { phase: "voting", currentQ: idx + 1 }); }
+      : async () => { await update(rref(S.code), { phase: "lobby", currentQ: 0, votes: {}, submissions: {}, qList: [] }); };
+  } else {
+    hostBar.style.display = "none";
+  }
+
+  _unsub = onValue(rref(S.code), snap => {
+    if (!snap.exists()) return;
+    const r = snap.val();
+    if (r.phase === "voting") goVoting(r);
+    if (r.phase === "lobby")  enterLobby();
+  });
+}
+
+window.leaveGame = () => {
+  if (_unsub) _unsub();
+  S = { code: null, myId: null, myName: null, isHost: false };
+  page("page-home");
+};
+
+// toggle real/fake buttons
+window.selectType = (type) => {
+  document.getElementById("stmt-real").classList.toggle("selected", type === "real");
+  document.getElementById("stmt-fake").classList.toggle("selected", type === "fake");
+};
+</script>
+
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:     #0a0a0a;
+    --card:   #111;
+    --border: #222;
+    --lime:   #b8ff57;
+    --lime2:  #d4ff8a;
+    --red:    #ff4757;
+    --text:   #f0f0f0;
+    --muted:  #555;
+    --font:   'Anybody', sans-serif;
+    --body:   'Space Grotesk', sans-serif;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--body);
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 1rem;
+    background-image: radial-gradient(ellipse 50% 40% at 50% 0%, rgba(184,255,87,.06), transparent 60%);
+  }
+
+  .page { display: none; width: 100%; max-width: 460px; animation: up .35s ease; }
+  .page.active { display: block; }
+  @keyframes up { from { opacity:0; transform:translateY(14px); } to { opacity:1; transform:translateY(0); } }
+
+  /* ── card ── */
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1.75rem;
+    position: relative;
+  }
+  .card::before {
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: linear-gradient(90deg, transparent, var(--lime), transparent);
+  }
+
+  /* ── logo ── */
+  .logo { text-align: center; margin-bottom: 1.75rem; }
+  .logo h1 {
+    font-family: var(--font);
+    font-size: clamp(2.2rem, 10vw, 3rem);
+    font-weight: 900;
+    letter-spacing: -.02em;
+    line-height: 1;
+  }
+  .logo h1 .leg  { color: var(--lime); }
+  .logo h1 .sep  { color: var(--muted); font-weight: 400; font-size: .7em; margin: 0 .15em; }
+  .logo h1 .not  { color: var(--text); }
+  .logo p { color: var(--muted); font-size: .75rem; letter-spacing: .15em; text-transform: uppercase; margin-top: .4rem; }
+
+  /* ── labels ── */
+  .sec { font-size: .68rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin-bottom: .6rem; }
+
+  /* ── inputs ── */
+  .field { margin-bottom: .85rem; }
+  label { display: block; font-size: .68rem; letter-spacing: .15em; text-transform: uppercase; color: var(--muted); margin-bottom: .35rem; }
+  input[type=text], textarea {
+    width: 100%; background: rgba(255,255,255,.04);
+    border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font-family: var(--body); font-size: .95rem;
+    padding: .6rem .85rem; outline: none; transition: border-color .15s; resize: none;
+  }
+  input[type=text]:focus, textarea:focus { border-color: var(--lime); }
+  input::placeholder, textarea::placeholder { color: var(--muted); }
+
+  /* toggle */
+  .toggle-row { display: flex; align-items: center; gap: .6rem; font-size: .84rem; margin-bottom: .9rem; cursor: pointer; }
+  .toggle-row input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--lime); cursor: pointer; }
+
+  /* divider */
+  .divider {
+    display: flex; align-items: center; gap: .75rem;
+    color: var(--muted); font-size: .68rem; letter-spacing: .15em;
+    text-transform: uppercase; margin: 1.25rem 0;
+  }
+  .divider::before, .divider::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+
+  /* ── buttons ── */
+  .btn {
+    display: block; width: 100%; padding: .7rem 1.25rem;
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: var(--body); font-size: .88rem; font-weight: 700;
+    cursor: pointer; transition: all .15s; text-align: center;
+  }
+  .btn + .btn { margin-top: .55rem; }
+  .btn-lime { background: var(--lime); color: #0a0a0a; border-color: var(--lime); }
+  .btn-lime:hover:not(:disabled) { background: var(--lime2); }
+  .btn-outline { background: transparent; color: var(--text); }
+  .btn-outline:hover:not(:disabled) { border-color: var(--lime); color: var(--lime); }
+  .btn-ghost { background: transparent; color: var(--muted); border-color: transparent; }
+  .btn-ghost:hover:not(:disabled) { color: var(--text); border-color: var(--border); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+
+  /* ── player chips ── */
+  .p-chip {
+    display: flex; align-items: center; justify-content: space-between;
+    background: rgba(255,255,255,.03); border: 1px solid var(--border);
+    border-radius: 4px; padding: .5rem .85rem; margin-bottom: .4rem;
+    font-size: .88rem;
+  }
+  .host-chip { border-color: rgba(184,255,87,.2); background: rgba(184,255,87,.04); }
+  .me-chip   { border-color: rgba(184,255,87,.15); }
+  .badge { font-size: .62rem; letter-spacing: .1em; padding: .15rem .45rem; border-radius: 2px; border: 1px solid; }
+  .badge.gold { color: #c9a84c; border-color: rgba(201,168,76,.3); }
+  .badge.lime { color: var(--lime); border-color: rgba(184,255,87,.3); }
+  .empty-state { color: var(--muted); font-size: .8rem; text-align: center; padding: .5rem 0; }
+  #lob-count { font-size: .7rem; color: var(--muted); margin-bottom: .85rem; }
+
+  /* ── code badge ── */
+  .code-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 1.25rem; }
+  .code-badge {
+    font-family: var(--font); font-size: 1.5rem; font-weight: 700; letter-spacing: .1em;
+    background: rgba(184,255,87,.1); border: 1px solid rgba(184,255,87,.25);
+    border-radius: 4px; padding: .25rem .75rem; color: var(--lime); cursor: pointer;
+  }
+
+  /* ── real/fake toggle ── */
+  .type-row { display: flex; gap: .6rem; margin-bottom: 1rem; }
+  .type-btn {
+    flex: 1; padding: .65rem; border-radius: 4px; border: 2px solid var(--border);
+    background: transparent; color: var(--muted);
+    font-family: var(--body); font-size: .82rem; font-weight: 700;
+    cursor: pointer; transition: all .15s; text-align: center;
+  }
+  .type-btn:hover { border-color: #444; color: var(--text); }
+  .type-btn.selected.real-btn { border-color: var(--lime); color: var(--lime); background: rgba(184,255,87,.08); }
+  .type-btn.selected.fake-btn { border-color: var(--red);  color: var(--red);  background: rgba(255,71,87,.08);  }
+
+  /* ── submit waiting ── */
+  #submit-waiting {
+    display: none; flex-direction: column; align-items: center;
+    justify-content: center; padding: 2rem 0; gap: .75rem;
+  }
+  #submit-waiting .big { font-family: var(--font); font-size: 2rem; }
+  #wait-count { font-size: .8rem; color: var(--muted); }
+  #host-start-voting-bar { display: none; width: 100%; margin-top: 1rem; }
+
+  /* ── voting ── */
+  #vote-q-num { font-size: .68rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin-bottom: .65rem; }
+  #vote-q-text {
+    font-family: var(--font); font-size: clamp(1.2rem, 5vw, 1.6rem);
+    font-weight: 700; line-height: 1.25; margin-bottom: 1.5rem; color: var(--text);
+  }
+  #vote-tally { font-size: .72rem; color: var(--muted); text-align: center; margin-bottom: 1rem; }
+  .vote-row { display: flex; gap: .6rem; margin-bottom: .75rem; }
+  .vote-big-btn {
+    flex: 1; padding: 1rem; border-radius: 6px; border: 2px solid var(--border);
+    background: transparent; font-family: var(--font); font-size: 1.1rem; font-weight: 900;
+    cursor: pointer; transition: all .2s; color: var(--text); letter-spacing: .05em;
+  }
+  .vote-big-btn:hover:not(:disabled) { transform: translateY(-2px); }
+  .vote-big-btn:disabled { opacity: .4; cursor: default; }
+  .vote-big-btn.chosen-legit { border-color: var(--lime); color: var(--lime); background: rgba(184,255,87,.08); }
+  .vote-big-btn.chosen-not   { border-color: var(--red);  color: var(--red);  background: rgba(255,71,87,.08);  }
+  #vote-host-bar { display: none; margin-top: 1rem; flex-direction: column; gap: .5rem; }
+
+  /* ── results ── */
+  #res-q-num { font-size: .68rem; letter-spacing: .2em; text-transform: uppercase; color: var(--muted); margin-bottom: .5rem; }
+  #res-q-text {
+    font-family: var(--font); font-size: clamp(1.1rem, 4.5vw, 1.45rem);
+    font-weight: 700; line-height: 1.25; margin-bottom: 1.25rem;
+    padding-bottom: 1.25rem; border-bottom: 1px solid var(--border);
+  }
+  .res-bars { display: flex; flex-direction: column; gap: .75rem; margin-bottom: 1.25rem; }
+  .res-bar-row { display: flex; flex-direction: column; gap: .3rem; }
+  .res-bar-label { display: flex; justify-content: space-between; font-size: .8rem; }
+  .res-bar-label .name { font-weight: 700; }
+  .res-bar-wrap { background: var(--border); border-radius: 3px; height: 8px; overflow: hidden; }
+  .res-bar { height: 100%; border-radius: 3px; width: 0; animation: grow .6s cubic-bezier(.22,1,.36,1) forwards; }
+  @keyframes grow { to { width: var(--w); } }
+  .bar-legit { background: var(--lime); }
+  .bar-not   { background: var(--red); }
+  .res-voters { font-size: .72rem; color: var(--muted); margin-top: .15rem; }
+
+  .res-author-section { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--border); }
+  #res-author-label { font-size: .88rem; color: var(--text); margin-bottom: .5rem; }
+  .truth-label { font-size: .95rem; font-weight: 700; margin-top: .5rem; padding: .5rem .75rem; border-radius: 4px; }
+  .truth-label.real { color: var(--lime); background: rgba(184,255,87,.08); border: 1px solid rgba(184,255,87,.2); }
+  .truth-label.fake { color: var(--red);  background: rgba(255,71,87,.08);  border: 1px solid rgba(255,71,87,.2);  }
+
+  #res-host-bar { display: none; flex-direction: column; gap: .5rem; margin-top: 1rem; }
+
+  /* ── toast ── */
+  .toast {
+    position: fixed; bottom: 1.5rem; left: 50%; transform: translateX(-50%) translateY(4rem);
+    background: #1a1a1a; border: 1px solid var(--border); border-radius: 4px;
+    padding: .55rem 1.25rem; font-size: .8rem; color: var(--text);
+    transition: transform .3s, opacity .3s; opacity: 0; z-index: 99; pointer-events: none; white-space: nowrap;
+  }
+  .toast.show { transform: translateX(-50%) translateY(0); opacity: 1; }
+  .toast.error { border-color: var(--red); color: var(--red); }
+</style>
+
+</head>
+<body>
+
+<!-- ══ HOME ══════════════════════════════════════════════════════ -->
+
+<div id="page-home" class="page active">
+  <div class="logo">
+    <h1><span class="leg">Legit</span><span class="sep">or</span><span class="not">Not</span></h1>
+    <p>Real or fake? You decide.</p>
+  </div>
+  <div class="card">
+    <div class="sec">Host a room</div>
+    <div class="field">
+      <label>Your name</label>
+      <input id="h-name" type="text" placeholder="Your name…" maxlength="20">
+    </div>
+    <label class="toggle-row">
+      <input id="anon-mode" type="checkbox">
+      Anonymous mode — authors never revealed
+    </label>
+    <button id="btn-create" class="btn btn-lime" onclick="createRoom()">Create Room</button>
+
+```
+<div class="divider">or join</div>
+
+<div class="field">
+  <label>Your name</label>
+  <input id="j-name" type="text" placeholder="Your name…" maxlength="20">
+</div>
+<div class="field">
+  <label>Room code</label>
+  <input id="j-code" type="text" placeholder="ABCD" maxlength="6">
+</div>
+<button id="btn-join" class="btn btn-outline" onclick="joinRoom()">Join Room</button>
+```
+
+  </div>
+</div>
+
+<!-- ══ LOBBY ══════════════════════════════════════════════════════ -->
+
+<div id="page-lobby" class="page">
+  <div class="logo"><h1><span class="leg">Legit</span><span class="sep">or</span><span class="not">Not</span></h1></div>
+  <div class="card">
+    <div class="code-row">
+      <div>
+        <div class="sec">Room code</div>
+        <div class="code-badge" id="lobby-code" onclick="navigator.clipboard?.writeText(this.textContent);toast('Copied!')">----</div>
+      </div>
+      <button class="btn btn-ghost" style="width:auto;padding:.4rem .8rem;font-size:.75rem" onclick="leaveGame()">Leave</button>
+    </div>
+    <div class="sec">Players</div>
+    <div id="lob-players"></div>
+    <div id="lob-count">0 players joined</div>
+    <div id="lob-host-bar">
+      <button id="btn-start-submit" class="btn btn-lime" onclick="startSubmit()" disabled>Everyone's here — Start →</button>
+    </div>
+    <div id="lob-wait" style="display:none">
+      <div style="color:var(--muted);font-size:.8rem;text-align:center;padding:.5rem 0">Waiting for host to start…</div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ SUBMIT ═════════════════════════════════════════════════════ -->
+
+<div id="page-submit" class="page">
+  <div class="logo"><h1><span class="leg">Legit</span><span class="sep">or</span><span class="not">Not</span></h1></div>
+  <div class="card">
+    <div id="submit-form">
+      <div class="sec">Your statement</div>
+      <div class="field">
+        <textarea id="stmt-input" rows="3" placeholder="Write something about yourself — real or fake…" maxlength="120"></textarea>
+      </div>
+      <div class="sec">Mark it as…</div>
+      <div class="type-row">
+        <button id="stmt-real" class="type-btn real-btn" onclick="selectType('real')">✅ Real</button>
+        <button id="stmt-fake" class="type-btn fake-btn" onclick="selectType('fake')">❌ Fake</button>
+      </div>
+      <button class="btn btn-lime" onclick="${'S.isHost ? hostSubmitStatement() : submitStatement()'}">Submit →</button>
+      <button class="btn btn-ghost" onclick="${'S.isHost ? hostSkip() : skipStatement()'}">Skip this round</button>
+    </div>
+    <div id="submit-waiting">
+      <div class="big">⏳</div>
+      <div style="font-weight:700">Submitted! Waiting for others…</div>
+      <div id="wait-count">0 / 0 ready</div>
+      <div id="host-start-voting-bar">
+        <button id="btn-start-voting" class="btn btn-lime" onclick="startVoting()" disabled>Start Voting →</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ VOTING ═════════════════════════════════════════════════════ -->
+
+<div id="page-voting" class="page">
+  <div class="card">
+    <div id="vote-q-num">Statement 1 of ?</div>
+    <div id="vote-q-text">…</div>
+    <div id="vote-tally">0 / 0 voted</div>
+    <div class="vote-row">
+      <button id="btn-vote-legit" class="vote-big-btn" onclick="castVote('legit')">✅ LEGIT</button>
+      <button id="btn-vote-not"   class="vote-big-btn" onclick="castVote('not')">❌ NOT</button>
+    </div>
+    <div id="vote-host-bar">
+      <button class="btn btn-lime" onclick="showQResults()">Show Results →</button>
+    </div>
+  </div>
+  <button class="btn btn-ghost" style="margin-top:.75rem" onclick="leaveGame()">Leave</button>
+</div>
+
+<!-- ══ RESULTS ════════════════════════════════════════════════════ -->
+
+<div id="page-results" class="page">
+  <div class="card">
+    <div id="res-q-num">Statement 1 of ?</div>
+    <div id="res-q-text">…</div>
+
+```
+<div class="res-bars">
+  <div class="res-bar-row">
+    <div class="res-bar-label">
+      <span class="name" style="color:var(--lime)">✅ Legit</span>
+      <span id="res-legit-pct">0%</span>
+    </div>
+    <div class="res-bar-wrap"><div id="res-legit-bar" class="res-bar bar-legit"></div></div>
+    <div class="res-voters" id="res-legit-voters"></div>
+  </div>
+  <div class="res-bar-row">
+    <div class="res-bar-label">
+      <span class="name" style="color:var(--red)">❌ Not</span>
+      <span id="res-not-pct">0%</span>
+    </div>
+    <div class="res-bar-wrap"><div id="res-not-bar" class="res-bar bar-not"></div></div>
+    <div class="res-voters" id="res-not-voters"></div>
+  </div>
+</div>
+
+<div id="res-author-section" class="res-author-section" style="display:none">
+  <button id="btn-reveal-author" class="btn btn-outline">👤 Reveal Author</button>
+  <div id="res-author-label" style="display:none"></div>
+  <div id="res-truth" class="truth-label" style="display:none"></div>
+</div>
+
+<div id="res-host-bar">
+  <button id="btn-next-q" class="btn btn-lime">Next Statement →</button>
+</div>
+```
+
+  </div>
+  <button class="btn btn-ghost" style="margin-top:.75rem" onclick="leaveGame()">Leave</button>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script>
+// Fix inline onclick for submit page (can't use template literals directly in HTML attributes with dynamic S.isHost)
+document.addEventListener("DOMContentLoaded", () => {
+  // patch submit/skip buttons to check S.isHost at runtime
+  document.querySelector("#submit-form .btn-lime").onclick = () =>
+    window.S?.isHost ? window.hostSubmitStatement() : window.submitStatement();
+  document.querySelector("#submit-form .btn-ghost").onclick = () =>
+    window.S?.isHost ? window.hostSkip() : window.skipStatement();
+});
+</script>
+
+</body>
+</html>
