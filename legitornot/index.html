@@ -113,9 +113,9 @@ function enterLobby() {
 function renderLobbyPlayers(room) {
   const players = room.players || {};
   const entries = Object.entries(players);
-  const hostChip = `<div class="p-chip host-chip"><span>${room.hostName || "Host"}</span><span class="badge gold">👑 Host</span></div>`;
+  const hostChip = `<div class="p-chip host-chip"><span>${room.hostName || "Host"}</span><span class="badge gold">${S.isHost ? "👑 You (Host)" : "👑 Host"}</span></div>`;
   const chips = entries.map(([id, p]) => {
-    const isMe = id === S.myId;
+    const isMe = !S.isHost && id === S.myId;
     return `<div class="p-chip ${isMe ? "me-chip" : ""}"><span>${p.name}</span>${isMe ? '<span class="badge lime">you</span>' : ""}</div>`;
   }).join("");
   document.getElementById("lob-players").innerHTML = hostChip + (chips || `<div class="empty-state">Waiting for players…</div>`);
@@ -151,7 +151,7 @@ window.submitStatement = async () => {
   const isReal = document.getElementById("stmt-real").classList.contains("selected");
   const isFake = document.getElementById("stmt-fake").classList.contains("selected");
   if (!text) return toast("Write a statement first", "error");
-  if (!isReal && !isFake) return toast("Mark it as Real or Fake", "error");
+  if (!isReal && !isFake) return toast("Mark it as Legit or Not", "error");
   await update(rref(S.code, "submissions"), {
     [S.myId]: { text, isReal: isReal, authorId: S.myId, authorName: S.myName }
   });
@@ -191,7 +191,7 @@ window.hostSubmitStatement = async () => {
   const isReal = document.getElementById("stmt-real").classList.contains("selected");
   const isFake = document.getElementById("stmt-fake").classList.contains("selected");
   if (!text) return toast("Write a statement first", "error");
-  if (!isReal && !isFake) return toast("Mark it as Real or Fake", "error");
+  if (!isReal && !isFake) return toast("Mark it as Legit or Not", "error");
   await update(rref(S.code, "submissions"), {
     [S.myId]: { text, isReal, authorId: S.myId, authorName: S.myName }
   });
@@ -651,10 +651,10 @@ window.selectType = (type) => {
       <div class="field">
         <textarea id="stmt-input" rows="3" placeholder="Write something about yourself — real or fake…" maxlength="120"></textarea>
       </div>
-      <div class="sec">Mark it as…</div>
+      <div class="sec">Is it Legit or Not?</div>
       <div class="type-row">
-        <button id="stmt-real" class="type-btn real-btn" onclick="selectType('real')">✅ Real</button>
-        <button id="stmt-fake" class="type-btn fake-btn" onclick="selectType('fake')">❌ Fake</button>
+        <button id="stmt-real" class="type-btn real-btn" onclick="selectType('real')">Legit</button>
+        <button id="stmt-fake" class="type-btn fake-btn" onclick="selectType('fake')">Not</button>
       </div>
       <button class="btn btn-lime" onclick="${'S.isHost ? hostSubmitStatement() : submitStatement()'}">Submit →</button>
       <button class="btn btn-ghost" onclick="${'S.isHost ? hostSkip() : skipStatement()'}">Skip this round</button>
@@ -678,8 +678,8 @@ window.selectType = (type) => {
     <div id="vote-q-text">…</div>
     <div id="vote-tally">0 / 0 voted</div>
     <div class="vote-row">
-      <button id="btn-vote-legit" class="vote-big-btn" onclick="castVote('legit')">✅ LEGIT</button>
-      <button id="btn-vote-not"   class="vote-big-btn" onclick="castVote('not')">❌ NOT</button>
+      <button id="btn-vote-legit" class="vote-big-btn" onclick="castVote('legit')">LEGIT</button>
+      <button id="btn-vote-not"   class="vote-big-btn" onclick="castVote('not')">NOT</button>
     </div>
     <div id="vote-host-bar">
       <button class="btn btn-lime" onclick="showQResults()">Show Results →</button>
@@ -699,7 +699,7 @@ window.selectType = (type) => {
 <div class="res-bars">
   <div class="res-bar-row">
     <div class="res-bar-label">
-      <span class="name" style="color:var(--lime)">✅ Legit</span>
+      <span class="name" style="color:var(--lime)">Legit</span>
       <span id="res-legit-pct">0%</span>
     </div>
     <div class="res-bar-wrap"><div id="res-legit-bar" class="res-bar bar-legit"></div></div>
@@ -707,7 +707,7 @@ window.selectType = (type) => {
   </div>
   <div class="res-bar-row">
     <div class="res-bar-label">
-      <span class="name" style="color:var(--red)">❌ Not</span>
+      <span class="name" style="color:var(--red)">Not</span>
       <span id="res-not-pct">0%</span>
     </div>
     <div class="res-bar-wrap"><div id="res-not-bar" class="res-bar bar-not"></div></div>
@@ -745,3 +745,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 </body>
 </html>
+
+
+
+
