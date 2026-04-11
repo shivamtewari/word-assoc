@@ -137,9 +137,7 @@ function renderPlayers(players, hostName) {
         ${S.isHost ? `
           <button class="chip-toggle ${p.isImpostor ? "imp" : ""}" onclick="toggleImpostor('${id}')">
             ${p.isImpostor ? "🕵️ Spy" : "👤 Agent"}
-          </button>` : `
-          <span class="role-badge ${p.isImpostor ? "imp" : ""}">${p.isImpostor ? "🕵️ Spy" : "👤 Agent"}</span>
-        `}
+          </button>` : ""}
       </div>`).join("");
 
   document.getElementById("player-list").innerHTML = hostChip + playerChips;
@@ -565,6 +563,14 @@ window.leaveGame = function() {
 <div id="toast" class="toast"></div>
 </body>
 </html>
+
+
+
+
+
+
+
+
 
 
 
